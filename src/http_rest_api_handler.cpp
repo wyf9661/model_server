@@ -53,6 +53,7 @@
 #include "model_metric_reporter.hpp"
 #include "modelinstance.hpp"
 #include "modelinstanceunloadguard.hpp"
+#include "openai_error_utils.hpp"
 #include "src/servable_management/modelmanager.hpp"
 #include "profiler.hpp"
 #include "rest_parser.hpp"
@@ -588,16 +589,12 @@ void parseModel(rapidjson::Writer<rapidjson::StringBuffer>& writer, const std::s
 Status HttpRestApiHandler::processRetrieveModelRequest(const std::string& name, std::string& response) {
     const auto names = modelManager.getNamesOfAvailableServables();
     const bool available = std::find(names.begin(), names.end(), name) != names.end();
-    rapidjson::StringBuffer buffer;
-    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     if (!available) {
-        writer.StartObject();
-        writer.String("error");
-        writer.String("Model not found");
-        writer.EndObject();
-        response = buffer.GetString();
+        response = makeOpenAIErrorBody("Model not found", StatusCode::MODEL_NOT_LOADED);
         return StatusCode::MODEL_NOT_LOADED;
     }
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
     time_t timestamp;
     time(&timestamp);
     parseModel(writer, name, timestamp);
@@ -740,13 +737,8 @@ Status HttpRestApiHandler::processOpenAI(const std::string_view uri, const HttpR
             auto status = executor->inferStream(*request, *serverReaderWriter, executionContext);
 
             if (!status.ok()) {
-                rapidjson::StringBuffer buffer;
-                rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
-                writer.StartObject();
-                writer.String("error");
-                writer.String(status.string().c_str());
-                writer.EndObject();
-                serverReaderWriter->PartialReplyWithStatus(buffer.GetString(), HTTPStatusCode::BAD_REQUEST);
+                const auto httpStatus = status.getCode() == StatusCode::MEDIAPIPE_DEFINITION_NOT_LOADED_ANYMORE ? HTTPStatusCode::NOT_FOUND : HTTPStatusCode::BAD_REQUEST;
+                serverReaderWriter->PartialReplyWithStatus(makeOpenAIErrorBody(status), httpStatus);
             }
         });
         return StatusCode::PARTIAL_END;

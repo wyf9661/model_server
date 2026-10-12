@@ -20,6 +20,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <random>
 #include <stdexcept>
 #include <unordered_map>
 #include "src/port/rapidjson_stringbuffer.hpp"
@@ -98,6 +99,20 @@ std::string OpenAIApiHandler::serializeStreamingInProgressEvent() {
 
 std::string OpenAIApiHandler::serializeFailedEvent(const std::string& errorMessage, ResponsesErrorCode errorCode) {
     return "";
+}
+
+// Generates an OpenAI-shaped completion id: "chatcmpl-" + 24 random hex chars.
+// Uses a thread_local generator so concurrent handlers on different threads do not
+// contend, and a random_device-seeded engine so ids differ across server restarts.
+std::string OpenAIApiHandler::generateCompletionId() {
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    static const char* hexDigits = "0123456789abcdef";
+    std::string id = "chatcmpl-";
+    id.reserve(33);
+    for (int i = 0; i < 24; ++i) {
+        id += hexDigits[rng() & 0xF];
+    }
+    return id;
 }
 
 absl::Status OpenAIApiHandler::parseResponseFormat() {

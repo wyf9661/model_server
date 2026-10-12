@@ -109,6 +109,11 @@ protected:
     const std::string toolParserName;
     const std::string reasoningParserName;
 
+    // Unique identifier for this response, generated once at handler construction and
+    // reused by every serialization path (unary body, every SSE chunk, usage chunk) so
+    // that a stream's chunks all carry the same id — required by the OpenAI contract.
+    std::string responseId;
+
     // Output parser is used to parse chat completions response to extract specific fields like tool calls and reasoning.
     std::shared_ptr<OutputParser> outputParser = nullptr;
 
@@ -147,7 +152,8 @@ public:
         created(creationTime),
         tokenizer(tokenizer),
         toolParserName(toolParserName),
-        reasoningParserName(reasoningParserName) {}
+        reasoningParserName(reasoningParserName),
+        responseId(generateCompletionId()) {}
 
     virtual ~OpenAIApiHandler() = default;
 
@@ -233,6 +239,9 @@ public:
     virtual std::string serializeStreamingCreatedEvent();
     virtual std::string serializeStreamingInProgressEvent();
     virtual std::string serializeFailedEvent(const std::string& errorMessage, ResponsesErrorCode errorCode = ResponsesErrorCode::SERVER_ERROR);
+
+    // OpenAI-compatible response identifier ("chatcmpl-<24 hex chars>"), per-handler unique.
+    static std::string generateCompletionId();
 };
 
 // Free functions shared across handlers

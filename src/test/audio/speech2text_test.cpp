@@ -349,8 +349,10 @@ TEST_F(Speech2TextStreamingTest, streamingTranslationIsNotSupported) {
             rapidjson::Document d;
             ASSERT_EQ(d.Parse(responseBody.c_str()).HasParseError(), false);
             ASSERT_TRUE(d.HasMember("error"));
-            ASSERT_TRUE(d["error"].IsString());
-            EXPECT_NE(std::string(d["error"].GetString()).find("streaming is not supported for translations endpoint"), std::string::npos);
+            ASSERT_TRUE(d["error"].IsObject()) << responseBody;
+            EXPECT_NE(std::string(d["error"]["message"].GetString()).find("streaming is not supported for translations endpoint"), std::string::npos);
+            EXPECT_STREQ(d["error"]["type"].GetString(), "invalid_request_error");
+            EXPECT_STREQ(d["error"]["code"].GetString(), "invalid_parameter");
         });
     EXPECT_CALL(*writer, PartialReplyEnd()).Times(1);
 

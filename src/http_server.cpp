@@ -32,6 +32,7 @@
 #include "http_rest_api_handler.hpp"
 #include "http_status_code.hpp"
 #include "logging.hpp"
+#include "openai_error_utils.hpp"
 #include "status.hpp"
 
 #include <drogon/drogon.h>
@@ -55,6 +56,9 @@ static const ovms::HTTPStatusCode http(const ovms::Status& status) {
         {StatusCode::REST_INVALID_URL, ovms::HTTPStatusCode::BAD_REQUEST},
         {StatusCode::REST_UNSUPPORTED_METHOD, ovms::HTTPStatusCode::NONE_ACC},
         {StatusCode::REST_NOT_FOUND, ovms::HTTPStatusCode::NOT_FOUND},
+        // Missing before: an invalid/missing api-key fell through to the default
+        // branch below and was reported as HTTP 500 instead of 401.
+        {StatusCode::UNAUTHORIZED, ovms::HTTPStatusCode::UNAUTHORIZED},
 
         // REST parser failure
         {StatusCode::REST_BODY_IS_NOT_AN_OBJECT, ovms::HTTPStatusCode::BAD_REQUEST},
@@ -83,7 +87,8 @@ static const ovms::HTTPStatusCode http(const ovms::Status& status) {
         {StatusCode::MODEL_NOT_LOADED, ovms::HTTPStatusCode::ERROR},
         {StatusCode::SERVER_NOT_READY, ovms::HTTPStatusCode::SERVICE_UNAV},
         {StatusCode::SERVER_SHUTTING_DOWN, ovms::HTTPStatusCode::SERVICE_UNAV},
-        {StatusCode::JSON_INVALID, ovms::HTTPStatusCode::PRECOND_FAILED},
+        // Malformed JSON is a client error (OpenAI returns 400), not a 412 precondition failure.
+        {StatusCode::JSON_INVALID, ovms::HTTPStatusCode::BAD_REQUEST},
         {StatusCode::MODELINSTANCE_NOT_FOUND, ovms::HTTPStatusCode::ERROR},
         {StatusCode::SHAPE_WRONG_FORMAT, ovms::HTTPStatusCode::ERROR},
         {StatusCode::PLUGIN_CONFIG_WRONG_FORMAT, ovms::HTTPStatusCode::ERROR},
@@ -200,13 +205,7 @@ std::unique_ptr<DrogonHttpServer> createAndStartDrogonHttpServer(const std::stri
             return;
         }
         if (!status.ok() && output.empty()) {
-            rapidjson::StringBuffer buffer;
-            rapidjson::Writer<rapidjson::StringBuffer> errorWriter(buffer);
-            errorWriter.StartObject();
-            errorWriter.String("error");
-            errorWriter.String(status.string().c_str());
-            errorWriter.EndObject();
-            output = buffer.GetString();
+            output = makeOpenAIErrorBody(status);
         }
         auto resp = drogon::HttpResponse::newHttpResponse();
 

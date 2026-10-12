@@ -882,6 +882,7 @@ ovms_cc_library(
             "libovmsmodelversioning",
             "httppayload",
             "libhttpclientconnection",
+            "openai_error_utils",
             #"libovmsoclutils", # TODO decide if will need
             "libovmstensorfactory",
             "libovms_threadsafequeue",
@@ -1155,6 +1156,16 @@ ovms_cc_library(
 ovms_cc_library(
     name = "sse_utils",
     hdrs = ["sse_utils.hpp"],
+    visibility = ["//visibility:public"],
+)
+
+ovms_cc_library(
+    name = "openai_error_utils",
+    hdrs = ["openai_error_utils.hpp"],
+    deps = [
+        "libovmsstatus",
+        "cpp_headers",
+    ],
     visibility = ["//visibility:public"],
 )
 

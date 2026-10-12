@@ -164,20 +164,32 @@ public:
         }
         String("role", "assistant");
 
-        StartArray("tool_calls");
-        for (const ToolCall& toolCall : parsedOutput.toolCalls) {
-            StartObject();
-            String("id", toolCall.id);
-            String("type", "function");
+        // refusal: string or null. OpenAI always emits the field; null means the model
+        // did not refuse. Emitted for schema compatibility with strict clients.
+        String("refusal");
+        Null();
 
-            StartObject("function");
-            String("name", toolCall.name);
-            String("arguments", toolCall.arguments);
-            Writer<StringBuffer>::EndObject();
+        // tool_calls: array or null. OpenAI returns null (not an empty array) when the
+        // model produced no tool calls, and clients branch on that distinction.
+        if (parsedOutput.toolCalls.empty()) {
+            String("tool_calls");
+            Null();
+        } else {
+            StartArray("tool_calls");
+            for (const ToolCall& toolCall : parsedOutput.toolCalls) {
+                StartObject();
+                String("id", toolCall.id);
+                String("type", "function");
 
-            Writer<StringBuffer>::EndObject();
+                StartObject("function");
+                String("name", toolCall.name);
+                String("arguments", toolCall.arguments);
+                Writer<StringBuffer>::EndObject();
+
+                Writer<StringBuffer>::EndObject();
+            }
+            Writer<StringBuffer>::EndArray();
         }
-        Writer<StringBuffer>::EndArray();
         Writer<StringBuffer>::EndObject();
         return true;
     }

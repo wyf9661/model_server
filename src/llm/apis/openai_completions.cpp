@@ -308,6 +308,7 @@ std::string OpenAIChatCompletionsHandler::serializeUnaryResponse(
 
     OpenAiJsonResponse jsonResponse;
     jsonResponse.StartObject();
+    jsonResponse.String("id", responseId);
 
     jsonResponse.StartArray("choices");
     jsonResponse.StartObject();
@@ -337,6 +338,7 @@ std::string OpenAIChatCompletionsHandler::serializeUnaryResponse(
     } else if (endpoint == Endpoint::COMPLETIONS) {
         jsonResponse.String("object", "text_completion");
     }
+    jsonResponse.String("system_fingerprint", "ovms");
 
     const bool includeCachedPromptTokens = endpoint == Endpoint::CHAT_COMPLETIONS;
     jsonResponse.UsageObject(usage, includeCachedPromptTokens);
@@ -360,6 +362,7 @@ std::string OpenAIChatCompletionsHandler::serializeUnaryResponse(
 
     OpenAiJsonResponse jsonResponse;
     jsonResponse.StartObject();
+    jsonResponse.String("id", responseId);
 
     jsonResponse.StartArray("choices");
     for (size_t i = 0; i < allDeltas.size(); ++i) {
@@ -449,6 +452,7 @@ std::string OpenAIChatCompletionsHandler::serializeUnaryResponse(
     } else if (endpoint == Endpoint::COMPLETIONS) {
         jsonResponse.String("object", "text_completion");
     }
+    jsonResponse.String("system_fingerprint", "ovms");
 
     const bool includeCachedPromptTokens = endpoint == Endpoint::CHAT_COMPLETIONS;
     jsonResponse.UsageObject(usage, includeCachedPromptTokens);
@@ -516,11 +520,18 @@ std::string OpenAIChatCompletionsHandler::serializeStreamingChunk(Delta delta, o
     choices.PushBack(choice, allocator);
     doc.AddMember("choices", choices, allocator);
 
+    // id: string; A unique identifier for the chat completion. Every chunk of a stream
+    // carries the same id, so clients can group chunks belonging to one response.
+    doc.AddMember("id", Value(responseId.c_str(), allocator), allocator);
+
     // created: integer; Unix timestamp (in seconds) when the MP graph was created.
     doc.AddMember("created", std::chrono::duration_cast<std::chrono::seconds>(created.time_since_epoch()).count(), allocator);
 
     // model: string; copied from the request
     doc.AddMember("model", Value(request.model.c_str(), allocator), allocator);
+
+    // system_fingerprint: string; backend configuration fingerprint.
+    doc.AddMember("system_fingerprint", Value("ovms", allocator), allocator);
 
     // object: string; defined that the type streamed chunk rather than complete response
     if (endpoint == Endpoint::CHAT_COMPLETIONS) {
@@ -532,11 +543,6 @@ std::string OpenAIChatCompletionsHandler::serializeStreamingChunk(Delta delta, o
     if (request.streamOptions.includeUsage) {
         doc.AddMember("usage", Value(), allocator);
     }
-
-    // TODO: id: string; A unique identifier for the chat completion. Each chunk has the same ID.
-
-    // TODO: system_fingerprint: string; This fingerprint represents the backend configuration that the model runs with.
-    // Can be used in conjunction with the seed request parameter to understand when backend changes have been made that might impact determinism.
 
     // Verbose mode: attach prompt and raw model output to the FINAL chunk only.
     if (isVerboseResponse() && finishReason != ov::genai::GenerationFinishReason::NONE) {
@@ -565,6 +571,9 @@ std::string OpenAIChatCompletionsHandler::serializeStreamingUsageChunk() {
     Writer<StringBuffer> writer(buffer);
 
     writer.StartObject();  // {
+
+    writer.String("id");
+    writer.String(responseId.c_str());
 
     writer.String("choices");
     writer.StartArray();  // [
@@ -640,6 +649,8 @@ std::string OpenAIChatCompletionsHandler::serializeStreamingHandshakeChunk() {
     choices.PushBack(choice, allocator);
 
     doc.AddMember("choices", choices, allocator);
+
+    doc.AddMember("id", Value(responseId.c_str(), allocator), allocator);
 
     // created: integer; Unix timestamp (in seconds) when the MP graph was created.
     doc.AddMember("created", std::chrono::duration_cast<std::chrono::seconds>(created.time_since_epoch()).count(), allocator);

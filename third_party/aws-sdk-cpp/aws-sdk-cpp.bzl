@@ -107,7 +107,8 @@ cmake(
         "CMAKE_POSITION_INDEPENDENT_CODE": "ON",
         "FORCE_SHARED_CRT": "OFF",
         "SIMPLE_INSTALL": "OFF",
-        "CMAKE_CXX_FLAGS": "-D_GLIBCXX_USE_CXX11_ABI=1 -Wno-error=deprecated-declarations -Wuninitialized\",
+        "CMAKE_CXX_FLAGS": "-D_GLIBCXX_USE_CXX11_ABI=1 -Wno-error=deprecated-declarations -Wno-error=array-bounds -Wuninitialized",
+        "OPENSSL_ROOT_DIR": "/usr",
     }} | select({{
            "//conditions:default": dict(
                build_release

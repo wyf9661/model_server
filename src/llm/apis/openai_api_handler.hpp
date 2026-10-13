@@ -157,6 +157,12 @@ public:
 
     virtual ~OpenAIApiHandler() = default;
 
+    // Exposes the completion id so the request status registry can key records on it.
+    const std::string& getResponseId() const { return responseId; }
+
+    // Model name carried by the request (populated during parsing).
+    const std::string& getModelName() const { return request.model; }
+
     // Non-copyable, non-movable (holds Document reference)
     OpenAIApiHandler(const OpenAIApiHandler&) = delete;
     OpenAIApiHandler& operator=(const OpenAIApiHandler&) = delete;

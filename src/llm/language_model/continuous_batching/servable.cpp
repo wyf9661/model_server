@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "../../../logging.hpp"
+#include "../../../request_status_registry.hpp"
 #include "../../../status.hpp"
 
 #pragma warning(push)
@@ -98,6 +99,22 @@ absl::Status ContinuousBatchingServable::scheduleExecution(std::shared_ptr<GenAi
     auto status = addRequestToPipeline(cbExecutionContext);
     if (!status.ok()) {
         return status;
+    }
+
+    // Attach the pipeline probe used by the request status registry to refine
+    // QUEUED -> RUNNING lazily at query time (the CB pipeline exposes no
+    // mid-flight callback for unary requests).
+    if (executionContext->apiHandler) {
+        auto pipeline = properties->pipeline;
+        RequestStatusRegistry::instance().attachScheduledProbe(
+            executionContext->apiHandler->getResponseId(),
+            [pipeline]() -> std::optional<size_t> {
+                try {
+                    return pipeline->get_metrics().scheduled_requests;
+                } catch (...) {
+                    return std::nullopt;
+                }
+            });
     }
 
     cbExecutionContext->payload.client->registerDisconnectionCallback([genHandle = cbExecutionContext->generationHandle]() {

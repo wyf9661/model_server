@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <iomanip>
 #include <memory>
 #include <mutex>
@@ -55,6 +56,7 @@
 #include "modelinstance.hpp"
 #include "modelinstanceunloadguard.hpp"
 #include "openai_error_utils.hpp"
+#include "request_status_registry.hpp"
 #include "src/servable_management/modelmanager.hpp"
 #include "profiler.hpp"
 #include "rest_parser.hpp"
@@ -116,6 +118,12 @@ const std::string HttpRestApiHandler::v3_RetrieveModelRegexExp =
 const std::string HttpRestApiHandler::v3_RegexExp =
     R"((?:/v3/|/v1/).*?(/|$))";
 
+// Per-request status query: /v1/requests (list in-flight) or
+// /v1/requests/{id} (single request). The v3/(v1/)? prefix variant is
+// accepted like the other v3 endpoints.
+const std::string HttpRestApiHandler::v3_RequestStatusRegexExp =
+    R"((?:/v3/(v1/)?|/v1/)requests(?:/([^/?]+))?)";
+
 const std::string HttpRestApiHandler::metricsRegexExp = R"((.?)\/metrics(\?(.*))?)";
 
 HttpRestApiHandler::HttpRestApiHandler(ovms::Server& ovmsServer, int timeout_in_ms, const std::string& apiKey) :
@@ -131,6 +139,7 @@ HttpRestApiHandler::HttpRestApiHandler(ovms::Server& ovmsServer, int timeout_in_
     v3_ListModelsRegex(v3_ListModelsRegexExp),
     v3_RetrieveModelRegex(v3_RetrieveModelRegexExp),
     v3_Regex(v3_RegexExp),
+    v3_RequestStatusRegex(v3_RequestStatusRegexExp),
     metricsRegex(metricsRegexExp),
     timeout_in_ms(timeout_in_ms),
     ovmsServer(ovmsServer),
@@ -193,6 +202,17 @@ void HttpRestApiHandler::registerAll() {
     });
     registerHandler(V3_RetrieveModel, [this](const std::string_view uri, const HttpRequestComponents& request_components, std::string& response, const std::string& request_body, HttpResponseComponents& response_components, std::shared_ptr<HttpAsyncWriter> serverReaderWriter, std::shared_ptr<MultiPartParser> multiPartParser) {
         return processRetrieveModelRequest(request_components.model_name, response);
+    });
+
+    // Per-request status query endpoints (backed by the in-process request
+    // status registry). No authentication: follows the metrics/health
+    // convention — the response carries timing information only.
+    registerHandler(V3_RequestStatus, [this](const std::string_view uri, const HttpRequestComponents& request_components, std::string& response, const std::string& request_body, HttpResponseComponents& response_components, std::shared_ptr<HttpAsyncWriter> serverReaderWriter, std::shared_ptr<MultiPartParser> multiPartParser) -> Status {
+        return this->processRequestStatus(request_components, response);
+    });
+
+    registerHandler(V3_RequestStatusList, [this](const std::string_view uri, const HttpRequestComponents& request_components, std::string& response, const std::string& request_body, HttpResponseComponents& response_components, std::shared_ptr<HttpAsyncWriter> serverReaderWriter, std::shared_ptr<MultiPartParser> multiPartParser) -> Status {
+        return this->processRequestStatusList(response);
     });
     registerHandler(V3, [this](const std::string_view uri, const HttpRequestComponents& request_components, std::string& response, const std::string& request_body, HttpResponseComponents& response_components, std::shared_ptr<HttpAsyncWriter> serverReaderWriter, std::shared_ptr<MultiPartParser> multiPartParser) -> Status {
         OVMS_PROFILE_FUNCTION();
@@ -582,6 +602,122 @@ void parseModel(rapidjson::Writer<rapidjson::StringBuffer>& writer, const std::s
     writer.String("owned_by");
     writer.String("OVMS");
     writer.EndObject();
+}
+
+namespace {
+const char* requestStatusToString(ovms::RequestLifecycleStatus status) {
+    switch (status) {
+    case ovms::RequestLifecycleStatus::QUEUED:
+        return "queued";
+    case ovms::RequestLifecycleStatus::RUNNING:
+        return "running";
+    case ovms::RequestLifecycleStatus::COMPLETED:
+        return "completed";
+    case ovms::RequestLifecycleStatus::FAILED:
+        return "failed";
+    }
+    return "unknown";
+}
+
+void writeJsonString(rapidjson::Writer<rapidjson::StringBuffer>& writer, const std::string& value) {
+    writer.String(value.c_str(), static_cast<rapidjson::SizeType>(value.size()));
+}
+}  // namespace
+
+Status HttpRestApiHandler::processRequestStatus(const HttpRequestComponents& request_components, std::string& response) {
+    const std::string& requestId = request_components.request_id;
+    auto& registry = RequestStatusRegistry::instance();
+    auto snapshot = registry.query(requestId);
+    if (!snapshot.has_value()) {
+        response = makeOpenAIErrorBody("Request not found or no longer tracked", StatusCode::REST_NOT_FOUND);
+        return StatusCode::REST_NOT_FOUND;
+    }
+    const auto& snap = *snapshot;
+
+    int64_t now = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::system_clock::now().time_since_epoch())
+                      .count();
+    int64_t startOrNow = snap.startedAtUs > 0 ? snap.startedAtUs : now;
+
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.String("id");
+    writeJsonString(writer, snap.id);
+    writer.String("model");
+    writeJsonString(writer, snap.model);
+    writer.String("status");
+    writer.String(requestStatusToString(snap.status));
+    writer.String("queue_position");
+    if (snap.queuePosition > 0)
+        writer.Uint64(snap.queuePosition);
+    else
+        writer.Null();
+    writer.String("in_flight");
+    writer.Uint64(registry.listInFlight().size());
+    writer.String("submitted_at_us");
+    writer.Int64(snap.submittedAtUs);
+    writer.String("scheduled_at_us");
+    if (snap.scheduledAtUs > 0)
+        writer.Int64(snap.scheduledAtUs);
+    else
+        writer.Null();
+    writer.String("started_at_us");
+    if (snap.startedAtUs > 0)
+        writer.Int64(snap.startedAtUs);
+    else
+        writer.Null();
+    writer.String("completed_at_us");
+    if (snap.completedAtUs > 0)
+        writer.Int64(snap.completedAtUs);
+    else
+        writer.Null();
+    // wait_ms: submitted -> started (or -> now while still in flight)
+    writer.String("wait_ms");
+    writer.Int64((startOrNow - snap.submittedAtUs) / 1000);
+    // ttft_ms: exact queue+prefill from genai perf metrics when reported
+    writer.String("ttft_ms");
+    if (snap.ttftUs >= 0)
+        writer.Int64(snap.ttftUs / 1000);
+    else
+        writer.Null();
+    writer.String("error");
+    if (snap.error.empty())
+        writer.Null();
+    else
+        writeJsonString(writer, snap.error);
+    writer.EndObject();
+    response = buffer.GetString();
+    return StatusCode::OK;
+}
+
+Status HttpRestApiHandler::processRequestStatusList(std::string& response) {
+    auto inFlight = RequestStatusRegistry::instance().listInFlight();
+    rapidjson::StringBuffer buffer;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(buffer);
+    writer.StartObject();
+    writer.String("in_flight");
+    writer.Uint64(inFlight.size());
+    writer.String("requests");
+    writer.StartArray();
+    for (const auto& snap : inFlight) {
+        writer.StartObject();
+        writer.String("id");
+        writeJsonString(writer, snap.id);
+        writer.String("model");
+        writeJsonString(writer, snap.model);
+        writer.String("status");
+        writer.String(requestStatusToString(snap.status));
+        writer.String("queue_position");
+        writer.Uint64(snap.queuePosition);
+        writer.String("submitted_at_us");
+        writer.Int64(snap.submittedAtUs);
+        writer.EndObject();
+    }
+    writer.EndArray();
+    writer.EndObject();
+    response = buffer.GetString();
+    return StatusCode::OK;
 }
 
 Status HttpRestApiHandler::processRetrieveModelRequest(const std::string& name, std::string& response) {
@@ -994,10 +1130,22 @@ Status HttpRestApiHandler::parseRequestComponents(HttpRequestComponents& request
             requestComponents.type = V3_RetrieveModel;
             return StatusCode::OK;
         }
+
+        // Per-request status query: /v1/requests (in-flight list) or
+        // /v1/requests/{id} (single request status).
+        if (std::regex_match(request_path, sm, v3_RequestStatusRegex)) {
+            if (sm[2].matched && sm[2].length() > 0) {
+                requestComponents.request_id = urlDecode(sm[2]);
+                requestComponents.type = V3_RequestStatus;
+            } else {
+                requestComponents.type = V3_RequestStatusList;
+            }
+            return StatusCode::OK;
+        }
         return (std::regex_match(request_path, sm, kfs_inferRegex, std::regex_constants::match_any) ||
                    std::regex_match(request_path, sm, configReloadRegex))
-                   ? StatusCode::REST_UNSUPPORTED_METHOD
-                   : StatusCode::REST_INVALID_URL;
+                  ? StatusCode::REST_UNSUPPORTED_METHOD
+                  : StatusCode::REST_INVALID_URL;
     }
     if (http_method == "OPTIONS") {
         requestComponents.type = Options;

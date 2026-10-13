@@ -190,6 +190,15 @@ ovms_cc_library(
     visibility = ["//visibility:public",],
 )
 ovms_cc_library(
+    name = "libovms_request_status_registry",
+    hdrs = ["request_status_registry.hpp"],
+    srcs = ["request_status_registry.cpp"],
+    deps = [
+        "libovmslogging",
+    ],
+    visibility = ["//visibility:public",],
+)
+ovms_cc_library(
     name = "servable",
     hdrs = ["servable.hpp"],
 )
@@ -839,6 +848,7 @@ ovms_cc_library(
             "rest_parser_utils",
             "libovms_cliparser",
             "libovms_config",
+            "//src:libovms_request_status_registry",
             "//src/mediapipe_internal:pipelinedefinitionstatus",
             "ovms_exit_codes",
             "libovms_execution_context",

@@ -16,6 +16,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -260,6 +261,15 @@ public:
     virtual absl::Status validateEndpoint(Endpoint endpoint) const {
         (void)endpoint;
         return absl::OkStatus();
+    }
+
+    // Override to expose the exact TTFT (pipeline submission -> first generated
+    // token, microseconds) measured by the generation pipeline for a finished
+    // request. Returns -1 when unavailable; the request status registry then
+    // keeps the lazily inferred start timestamp.
+    virtual int64_t getTtftUs(std::shared_ptr<GenAiServableExecutionContext>& executionContext) {
+        (void)executionContext;
+        return -1;
     }
 
     // Creates execution context for the request

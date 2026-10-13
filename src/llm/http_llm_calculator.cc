@@ -30,6 +30,7 @@
 #include "../logging.hpp"
 #include "../mediapipe_internal/graph_side_packets.hpp"
 #include "../profiler.hpp"
+#include "../request_status_registry.hpp"
 #include "apis/openai_completions.hpp"
 #include "servable.hpp"
 
@@ -42,6 +43,9 @@ const std::string LLM_EXECUTION_CONTEXT_SIDE_PACKET_TAG = "LLM_NODE_EXECUTION_CO
 
 class HttpLLMCalculator : public CalculatorBase {
     std::shared_ptr<GenAiServable> servable;
+    // Completion id of the request currently being processed, registered in the
+    // request status registry (empty when the request is not tracked).
+    std::string trackedRequestId;
     std::shared_ptr<GenAiExecutionContextHolder> executionContextHolder;
     std::shared_ptr<GenAiServableExecutionContext> executionContext;
 
@@ -149,17 +153,39 @@ public:
                     return status;
                 SPDLOG_LOGGER_DEBUG(llm_calculator_logger, "LLMCalculator  [Node: {}] Request parsed successfully", cc->NodeName());
 
+                // Register generation requests in the status registry (backs the
+                // per-request status query endpoint). The completion id exists from
+                // handler construction; tokenize requests are not tracked.
+                if (executionContext->apiHandler &&
+                    executionContext->endpoint != Endpoint::TOKENIZE) {
+                    trackedRequestId = executionContext->apiHandler->getResponseId();
+                    RequestStatusRegistry::instance().registerRequest(
+                        trackedRequestId, executionContext->apiHandler->getModelName());
+                }
+
                 // Runs necessary preprocessing on the input data like chat template application, tokenization or operations on visual data etc.
                 // Depending on the pipeline type, after calling this method executionContext should contain all necessary data to start the generation.
                 status = servable->prepareInputs(executionContext);
-                if (status != absl::OkStatus())
+                if (status != absl::OkStatus()) {
+                    if (!trackedRequestId.empty())
+                        RequestStatusRegistry::instance().markFailed(trackedRequestId, status.ToString());
                     return status;
+                }
                 SPDLOG_LOGGER_DEBUG(llm_calculator_logger, "LLMCalculator  [Node: {}] Input for the pipeline prepared successfully", cc->NodeName());
 
                 status = servable->scheduleExecution(executionContext);
-                if (status != absl::OkStatus())
+                if (status != absl::OkStatus()) {
+                    if (!trackedRequestId.empty())
+                        RequestStatusRegistry::instance().markFailed(trackedRequestId, status.ToString());
                     return status;
+                }
                 SPDLOG_LOGGER_DEBUG(llm_calculator_logger, "LLMCalculator  [Node: {}] Pipeline execution scheduled successfully", cc->NodeName());
+
+                // Handed to the pipeline. Servables exposing a queue (continuous
+                // batching) keep the request QUEUED here; queue-less servables are
+                // promoted to RUNNING by markScheduled itself.
+                if (!trackedRequestId.empty())
+                    RequestStatusRegistry::instance().markScheduled(trackedRequestId);
 
                 // For streaming, emit response.created event after scheduling execution.
                 // The response object now exists in the system. response.in_progress will
@@ -182,43 +208,74 @@ public:
             if (!executionContext->apiHandler->isStream()) {  // Unary scenario
                 OVMS_PROFILE_SCOPE("Unary generation cycle");
                 auto status = servable->readCompleteExecutionResults(executionContext);
-                if (status != absl::OkStatus())
+                if (status != absl::OkStatus()) {
+                    if (!trackedRequestId.empty())
+                        RequestStatusRegistry::instance().markFailed(trackedRequestId, status.ToString());
                     return status;
+                }
                 SPDLOG_LOGGER_TRACE(llm_calculator_logger, "LLMCalculator  [Node: {}] Received complete execution results, preparing response", cc->NodeName());
 
                 status = servable->prepareCompleteResponse(executionContext);
-                if (status != absl::OkStatus())
+                if (status != absl::OkStatus()) {
+                    if (!trackedRequestId.empty())
+                        RequestStatusRegistry::instance().markFailed(trackedRequestId, status.ToString());
                     return status;
+                }
                 SPDLOG_LOGGER_TRACE(llm_calculator_logger, "LLMCalculator  [Node: {}] Response prepared, sending it down the graph", cc->NodeName());
+
+                // Generation finished: record exact TTFT-derived start when the
+                // pipeline reports perf metrics.
+                if (!trackedRequestId.empty())
+                    RequestStatusRegistry::instance().markCompleted(trackedRequestId, servable->getTtftUs(executionContext));
 
                 std::string& response = executionContext->response;
                 cc->Outputs().Tag(OUTPUT_TAG_NAME).Add(new std::string{std::move(response)}, iterationBeginTimestamp);
             } else {  // Streaming scenario
                 OVMS_PROFILE_SCOPE("Stream generation cycle");
                 auto status = servable->readPartialExecutionResults(executionContext);
-                if (status != absl::OkStatus())
+                if (status != absl::OkStatus()) {
+                    if (!trackedRequestId.empty())
+                        RequestStatusRegistry::instance().markFailed(trackedRequestId, status.ToString());
                     return status;
+                }
                 SPDLOG_LOGGER_TRACE(llm_calculator_logger, "LLMCalculator  [Node: {}] Received partial execution results", cc->NodeName());
 
                 status = servable->preparePartialResponse(executionContext);
-                if (status != absl::OkStatus())
+                if (status != absl::OkStatus()) {
+                    if (!trackedRequestId.empty())
+                        RequestStatusRegistry::instance().markFailed(trackedRequestId, status.ToString());
                     return status;
+                }
                 std::string& response = executionContext->response;
                 if (!response.empty()) {
                     SPDLOG_LOGGER_TRACE(llm_calculator_logger, "LLMCalculator  [Node: {}] Response prepared, sending it down the graph", cc->NodeName());
+                    // First content chunk: exact start-of-generation signal for
+                    // streaming requests.
+                    if (!trackedRequestId.empty())
+                        RequestStatusRegistry::instance().markStarted(trackedRequestId);
                     cc->Outputs().Tag(OUTPUT_TAG_NAME).Add(new std::string{std::move(response)}, iterationBeginTimestamp);
                 }
-                if (executionContext->sendLoopbackSignal)
+                if (executionContext->sendLoopbackSignal) {
                     cc->Outputs().Tag(LOOPBACK_TAG_NAME).Add(new bool{true}, iterationBeginTimestamp);
+                } else if (!trackedRequestId.empty()) {
+                    // Final streaming iteration: generation finished.
+                    RequestStatusRegistry::instance().markCompleted(trackedRequestId, servable->getTtftUs(executionContext));
+                }
             }
         } catch (ov::AssertFailure& e) {
             SPDLOG_LOGGER_DEBUG(llm_calculator_logger, "LLMCalculator [Node: {}] Response generation failed: {}", cc->NodeName(), e.what());
+            if (!trackedRequestId.empty())
+                RequestStatusRegistry::instance().markFailed(trackedRequestId, e.what());
             return handleGenerationError(cc, e.what());
         } catch (const std::exception& e) {
             SPDLOG_LOGGER_DEBUG(llm_calculator_logger, "LLMCalculator [Node: {}] Response generation failed: {}", cc->NodeName(), e.what());
+            if (!trackedRequestId.empty())
+                RequestStatusRegistry::instance().markFailed(trackedRequestId, e.what());
             return handleGenerationError(cc, e.what());
         } catch (...) {
             SPDLOG_LOGGER_DEBUG(llm_calculator_logger, "LLMCalculator [Node: {}] Response generation failed due to unknown error", cc->NodeName());
+            if (!trackedRequestId.empty())
+                RequestStatusRegistry::instance().markFailed(trackedRequestId, "Response generation failed");
             return handleGenerationError(cc, "Response generation failed");
         }
         auto now = std::chrono::system_clock::now();

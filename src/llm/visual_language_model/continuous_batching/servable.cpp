@@ -120,4 +120,20 @@ absl::Status VisualLanguageModelServable::preparePartialResponse(std::shared_ptr
     return status;
 }
 
+// Exact TTFT for the request status registry. The registry derives
+// startedAtUs = scheduledAtUs + ttftUs, where scheduledAtUs is stamped after
+// pipeline submission, so the value must measure submission -> first token
+// only: embeddings preparation runs before submission and is therefore not
+// added here (logPerfMetrics adds it for reporting purposes only).
+int64_t VisualLanguageModelServable::getTtftUs(std::shared_ptr<GenAiServableExecutionContext>& executionContext) {
+    auto vlmExecutionContext = std::static_pointer_cast<VisualLanguageModelServableExecutionContext>(executionContext);
+    if (vlmExecutionContext->generationHandle == nullptr)
+        return -1;
+    auto perfMetrics = tryGetVlmPerfMetrics(vlmExecutionContext->generationHandle);
+    if (!perfMetrics)
+        return -1;
+    const double ttftMs = perfMetrics->get_ttft().mean;
+    return ttftMs > 0.0 ? static_cast<int64_t>(ttftMs * 1000.0) : -1;
+}
+
 }  // namespace ovms

@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "../../../logging.hpp"
+#include "../../../request_status_registry.hpp"
 #include "../../../status.hpp"
 
 #pragma warning(push)
@@ -117,6 +118,22 @@ absl::Status ContinuousBatchingServable::scheduleExecution(std::shared_ptr<GenAi
         return status;
     }
 
+    // Attach the pipeline probe used by the request status registry to refine
+    // QUEUED -> RUNNING lazily at query time (the CB pipeline exposes no
+    // mid-flight callback for unary requests).
+    if (executionContext->apiHandler) {
+        auto pipeline = properties->pipeline;
+        RequestStatusRegistry::instance().attachScheduledProbe(
+            executionContext->apiHandler->getResponseId(),
+            [pipeline]() -> std::optional<size_t> {
+                try {
+                    return pipeline->get_metrics().scheduled_requests;
+                } catch (...) {
+                    return std::nullopt;
+                }
+            });
+    }
+
     cbExecutionContext->payload.client->registerDisconnectionCallback([genHandle = cbExecutionContext->generationHandle]() {
         genHandle->stop();
     });
@@ -198,6 +215,20 @@ absl::Status ContinuousBatchingServable::preparePartialResponse(std::shared_ptr<
             logPerfMetrics(*perfMetrics);
     }
     return status;
+}
+
+// Exact TTFT for the request status registry: the request's generation handle
+// carries the pipeline perf metrics once the request is finished. Called by the
+// LLM calculator at completion time (same point where the metrics are logged).
+int64_t ContinuousBatchingServable::getTtftUs(std::shared_ptr<GenAiServableExecutionContext>& executionContext) {
+    auto cbExecutionContext = std::static_pointer_cast<ContinuousBatchingServableExecutionContext>(executionContext);
+    if (cbExecutionContext->generationHandle == nullptr)
+        return -1;
+    auto perfMetrics = tryGetPerfMetrics(cbExecutionContext->generationHandle);
+    if (!perfMetrics)
+        return -1;
+    const double ttftMs = perfMetrics->get_ttft().mean;
+    return ttftMs > 0.0 ? static_cast<int64_t>(ttftMs * 1000.0) : -1;
 }
 
 }  // namespace ovms

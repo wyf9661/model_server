@@ -33,6 +33,7 @@ ovms_cc_library(
         "//third_party:genai",
         "//src/mediapipe_internal:node_initializer",
         "//src:libovmslogging",
+        "//src:libovms_request_status_registry",
         "//src:libovmsstring_utils",],
     visibility = ["//visibility:public"],
     alwayslink = 1, # needed, so the calculator can be registered by MediaPipe
@@ -603,6 +604,7 @@ ovms_cc_library(
         "//src:executor_base",
         "//src:libmodelconfigjsonparser",
         "//src:libovmslogging",
+        "//src:libovms_request_status_registry",
         "//src:libovmsstatus",
         "//src/mediapipe_internal:mediapipe_utils",
         "//src:libovmsprofiler",

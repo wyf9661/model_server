@@ -48,6 +48,8 @@ enum RequestType { ConfigReload,
     KFS_GetServerMetadata,
     V3_ListModels,
     V3_RetrieveModel,
+    V3_RequestStatus,
+    V3_RequestStatusList,
     V3,
     Metrics,
     Options };
@@ -62,6 +64,7 @@ struct HttpRequestComponents {
     std::string model_subresource;
     std::optional<int> inferenceHeaderContentLength;
     std::unordered_map<std::string, std::string> headers;
+    std::string request_id;  // completion id for /requests/{id} queries
 };
 
 enum class ContentType {
@@ -103,6 +106,8 @@ public:
     static const std::string v3_ListModelsRegexExp;
     static const std::string v3_RetrieveModelRegexExp;
     static const std::string v3_RegexExp;
+
+    static const std::string v3_RequestStatusRegexExp;
 
     /**
      * @brief Construct a new HttpRest Api Handler
@@ -166,6 +171,9 @@ public:
 
     Status processServerReadyKFSRequest(const HttpRequestComponents& request_components, std::string& response, const std::string& request_body);
     Status processServerLiveKFSRequest(const HttpRequestComponents& request_components, std::string& response, const std::string& request_body);
+
+    Status processRequestStatus(const HttpRequestComponents& request_components, std::string& response);
+    Status processRequestStatusList(std::string& response);
     Status processServerMetadataKFSRequest(const HttpRequestComponents& request_components, std::string& response, const std::string& request_body);
 
     Status processOpenAI(const std::string_view uri, const HttpRequestComponents& request_components, std::string& response, const std::string& request_body, std::shared_ptr<HttpAsyncWriter> serverReaderWriter, std::shared_ptr<MultiPartParser> multiPartParser);
@@ -189,6 +197,7 @@ private:
     const std::regex v3_ListModelsRegex;
     const std::regex v3_RetrieveModelRegex;
     const std::regex v3_Regex;
+    const std::regex v3_RequestStatusRegex;
 
     const std::regex metricsRegex;
 

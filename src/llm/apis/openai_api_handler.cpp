@@ -123,6 +123,46 @@ absl::Status OpenAIApiHandler::parseResponseFormat() {
         if (!it->value.IsObject())
             return absl::InvalidArgumentError("response_format is not an object");
         const rapidjson::Value& responseFormat = it->value;
+
+        // Validate response_format.type. OpenAI accepts text|json_object|json_schema;
+        // any other value is a client error - silently ignoring it would let callers
+        // believe structured output is enforced when it is not.
+        std::string responseFormatType;
+        auto typeIt = responseFormat.FindMember("type");
+        if (typeIt != responseFormat.MemberEnd() && !typeIt->value.IsNull()) {
+            if (!typeIt->value.IsString())
+                return absl::InvalidArgumentError("response_format.type must be a string");
+            responseFormatType = typeIt->value.GetString();
+            if (responseFormatType != "text" && responseFormatType != "json_object" && responseFormatType != "json_schema") {
+                return absl::InvalidArgumentError("response_format.type must be one of: text, json_object, json_schema");
+            }
+        }
+
+        if (responseFormatType == "json_schema") {
+            auto jsonSchemaIt = responseFormat.FindMember("json_schema");
+            if (jsonSchemaIt == responseFormat.MemberEnd() || !jsonSchemaIt->value.IsObject()) {
+                return absl::InvalidArgumentError("response_format.json_schema must be an object when type is json_schema");
+            }
+        }
+
+        if (responseFormatType == "json_object") {
+            // OpenAI's json_object means "any valid JSON object". OVMS enforces
+            // structure through the same XGrammar path as json_schema, so map it
+            // onto a permissive object schema instead of dropping it silently.
+            rapidjson::Document permissiveFormat;
+            permissiveFormat.SetObject();
+            rapidjson::Document::AllocatorType& allocator = permissiveFormat.GetAllocator();
+            permissiveFormat.AddMember("type", "json_schema", allocator);
+            rapidjson::Value jsonSchema(rapidjson::kObjectType);
+            jsonSchema.AddMember("name", "any", allocator);
+            rapidjson::Value schema(rapidjson::kObjectType);
+            schema.AddMember("type", "object", allocator);
+            jsonSchema.AddMember("schema", schema, allocator);
+            permissiveFormat.AddMember("json_schema", jsonSchema, allocator);
+            request.responseFormat = convertOpenAIResponseFormatToStructuralTagStringFormat(permissiveFormat);
+            return absl::OkStatus();
+        }
+
         request.responseFormat = convertOpenAIResponseFormatToStructuralTagStringFormat(responseFormat);
     }
     return absl::OkStatus();
@@ -555,11 +595,40 @@ std::string convertOpenAIResponseFormatToStructuralTagStringFormat(const rapidjs
     return buffer.GetString();
 }
 
+// Top-level request keys consumed by the OpenAI-compatible handlers (chat,
+// completions and responses endpoints combined). Keys outside this set are
+// logged as warnings so operators can see when a client sends a parameter
+// OVMS silently ignores - the hardest class of integration bug to diagnose.
+static const std::set<std::string> KNOWN_OPENAI_REQUEST_KEYS = {
+    "model", "messages", "prompt", "input", "stream", "stream_options",
+    "max_tokens", "max_completion_tokens", "max_output_tokens",
+    "n", "best_of", "temperature", "top_p", "top_k", "min_p", "seed",
+    "frequency_penalty", "presence_penalty", "repetition_penalty", "length_penalty",
+    "stop", "include_stop_str_in_output", "logprobs", "response_format",
+    "tools", "tool_choice", "reasoning_effort", "reasoning_strength",
+    "chat_template_kwargs", "echo", "ignore_eos",
+    "num_assistant_tokens", "assistant_confidence_threshold",
+    "max_ngram_size", "branching_factor", "tree_depth", "include_usage",
+};
+
+static void warnOnUnknownRequestKeys(const rapidjson::Document& requestDoc) {
+    for (auto it = requestDoc.MemberBegin(); it != requestDoc.MemberEnd(); ++it) {
+        if (!it->name.IsString())
+            continue;
+        if (KNOWN_OPENAI_REQUEST_KEYS.find(it->name.GetString()) == KNOWN_OPENAI_REQUEST_KEYS.end()) {
+            SPDLOG_LOGGER_WARN(llm_calculator_logger,
+                "Request contains parameter \"{}\" which is not supported by this server and will be ignored",
+                it->name.GetString());
+        }
+    }
+}
+
 absl::Status OpenAIApiHandler::parseCommonPart(std::optional<uint32_t> maxTokensLimit, uint32_t bestOfLimit, std::optional<uint32_t> maxModelLength) {
     OVMS_PROFILE_FUNCTION();
     // stream: bool; optional
     if (!doc.IsObject())
         return absl::InvalidArgumentError("Received json is not an object");
+    warnOnUnknownRequestKeys(doc);
     auto it = doc.FindMember("stream");
     if (it != doc.MemberEnd() && !it->value.IsNull()) {
         if (!it->value.IsBool())
@@ -808,7 +877,17 @@ absl::Status OpenAIApiHandler::parseCommonPart(std::optional<uint32_t> maxTokens
             return absl::InvalidArgumentError("n greater than 1 is not supported for Responses API streaming");
         size_t bestOf = request.bestOf.has_value() ? request.bestOf.value() : 1;  // 1 is default best_of value
         if (bestOf < it->value.GetUint()) {
-            return absl::InvalidArgumentError("n value cannot be greater than best_of");
+            // OpenAI semantics: n = number of candidate completions. OVMS requires
+            // num_return_sequences <= best_of (group size), so raise best_of to match
+            // instead of rejecting a valid OpenAI request. best_of is an OVMS/vLLM
+            // extension the OpenAI client never sends.
+            if (request.stream) {
+                return absl::InvalidArgumentError("n greater than 1 is not supported in streaming mode");
+            }
+            if (!(it->value.GetUint() < bestOfLimit)) {
+                return absl::InvalidArgumentError(absl::StrCat("n exceeds limit provided in graph config: ", bestOfLimit));
+            }
+            request.bestOf = it->value.GetUint();
         }
         request.numReturnSequences = it->value.GetUint();
     }
